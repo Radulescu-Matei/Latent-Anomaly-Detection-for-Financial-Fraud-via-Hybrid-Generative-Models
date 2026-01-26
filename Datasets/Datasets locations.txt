@@ -1,4 +1,4 @@
 Credit Card Fraud Detection: creditcard.csv :https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud?resource=download
 
-IEEE-CIS Fraud Detection : sample_submission.csv : https://www.kaggle.com/competitions/ieee-fraud-detection/data
+IEEE-CIS Fraud Detection : https://www.kaggle.com/competitions/ieee-fraud-detection/data
 
