@@ -3,3 +3,8 @@ This project explores a fraud detection system that combines two types of neural
 By mixing these two approaches, the system is designed to handle highly imbalanced data (where fraud is rare) and adapt as transaction behavior changes over time. This makes it a flexible starting point for building more reliable fraud detection models.
 
 The project will be developed step by step. It will start with simple baseline models and autoencoders trained on public fraud datasets. From there, the combined model will be added and improved, followed by work on better anomaly scoring and evaluation. Later stages will focus on improving stability, robustness, and understanding what the model learns internally.
+
+
+RUN EDA:
+
+FROM PARENT DIRECTORY : python3 src/eda/class_imbalance.py
