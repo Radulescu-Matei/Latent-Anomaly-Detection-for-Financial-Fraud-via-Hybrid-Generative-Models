@@ -1,0 +1,48 @@
+Transaction Amount Statistics
+
+
+CREDITCARD DATASET:
+
+Normal Transactions:
+  Count:    284,315
+  Mean:     88.29
+  Std Dev:  250.11
+  Min:      0.00
+  25%:      5.65
+  Median:   22.00
+  75%:      77.05
+  Max:      25,691.16
+
+Fraud Transactions:
+  Count:    492
+  Mean:     122.21
+  Std Dev:  256.68
+  Min:      0.00
+  25%:      1.00
+  Median:   9.25
+  75%:      105.89
+  Max:      2,125.87
+
+
+
+IEEE DATASET:
+
+Normal Transactions:
+  Count:    569,877
+  Mean:     134.51
+  Std Dev:  239.40
+  Min:      0.25
+  25%:      43.97
+  Median:   68.50
+  75%:      120.00
+  Max:      31,937.39
+
+Fraud Transactions:
+  Count:    20,663
+  Mean:     149.24
+  Std Dev:  232.21
+  Min:      0.29
+  25%:      35.04
+  Median:   75.00
+  75%:      161.00
+  Max:      5,191.00

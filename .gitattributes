@@ -1,2 +1,0 @@
-Datasets/*.csv filter=lfs diff=lfs merge=lfs -text
-Datasets/creditcard.csv filter=lfs diff=lfs merge=lfs -text
