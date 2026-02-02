@@ -1,0 +1,19 @@
+Baseline for vae_baseline_creditcard file:
+
+Classification Metrics:
+Accuracy:           0.9483
+Precision:          0.0285
+Recall:             0.8776
+F1-Score:           0.0552
+
+Anomaly scoring:
+ROC-AUC:            0.9294
+PR-AUC:             0.3356
+
+Confusion Matrix:
+TN:     53933
+FP:    2931
+FN:    12
+TP:     86
+
+Threshold:0.487744

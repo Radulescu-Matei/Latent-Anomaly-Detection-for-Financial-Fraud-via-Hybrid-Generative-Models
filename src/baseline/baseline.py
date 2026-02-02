@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, Data_Loader
+from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -105,7 +105,6 @@ class Fraud_Classifier:
             df_merge = pd.read_csv(merge_info['path'])
             df = df.merge(df_merge, on=merge_info['on'], how='left')
         
-        
         y = df[self.target_column].values
         X = df.drop([self.target_column], axis=1)
         
@@ -153,6 +152,9 @@ class Fraud_Classifier:
         X_train_normal = self.scaler.fit_transform(X_train_normal)
         X_test = self.scaler.transform(X_test)
         
+        X_train_normal = np.nan_to_num(X_train_normal, nan=0.0, posinf=0.0, neginf=0.0)
+        X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
+        
         return X_train_normal, X_test, y_test
     
     ## Train the baseline
@@ -164,7 +166,7 @@ class Fraud_Classifier:
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         
         train_dataset = Fraud_Dataset(X_train_normal)
-        train_loader = Data_Loader(train_dataset, batch_size=self.batch_size, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         
         self.model.train()
         for epoch in range(self.epochs):
@@ -205,11 +207,13 @@ class Fraud_Classifier:
             x_recon, _, _ = self.model(X_test_tensor)
             recon_errors = torch.mean((X_test_tensor - x_recon) ** 2, dim=1).cpu().numpy()
         
+        recon_errors = np.nan_to_num(recon_errors, nan=1e10, posinf=1e10, neginf=0.0)
+        
         y_pred = (recon_errors > self.threshold).astype(int)
         
-        precision = precision_score(y_test, y_pred)
-        recall = recall_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, zero_division=0)
+        recall = recall_score(y_test, y_pred, zero_division=0)
+        f1 = f1_score(y_test, y_pred, zero_division=0)
         accuracy = accuracy_score(y_test, y_pred)
         roc_auc = roc_auc_score(y_test, recon_errors)
         pr_auc = average_precision_score(y_test, recon_errors)
@@ -217,11 +221,11 @@ class Fraud_Classifier:
         cm = confusion_matrix(y_test, y_pred)
         tn, fp, fn, tp = cm.ravel()
         
-        os.makedirs('results', exist_ok=True)
+        os.makedirs('src/baseline/results', exist_ok=True)
         
         ## Statistics for documentation
         with open(f'src/baseline/results/{output_name}.txt', 'w') as f:
-            f.write(f"Baseline  for {output_name} file:\n\n")
+            f.write(f"Baseline for {output_name} file:\n\n")
             
             ## Classic
             f.write("Classification Metrics:\n")
@@ -244,5 +248,4 @@ class Fraud_Classifier:
             
 
             ## If error > than it's probably fraud
-            f.write("Threshold:\n")
             f.write(f"Threshold:{self.threshold:.6f}")

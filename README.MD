@@ -9,4 +9,4 @@ RUN EDA:
 python3 src/eda/class_imbalance.py
 
 TRAIN BASELINE:
-python3 src/eda/train_baseline.py
+python3 src/baseline/train_baseline.py
