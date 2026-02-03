@@ -9,30 +9,31 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, roc_auc_score, precision_score, recall_score, f1_score, accuracy_score, average_precision_score
 import os
 
-## Variational Autoencoder
 class VAE(nn.Module):
     def __init__(self, input_dim, latent_dim=32):
         super(VAE, self).__init__()
         
+        hidden_1 = max(128, input_dim // 2)
+        hidden_2 = max(64, input_dim // 4)
+        
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU()
+            nn.Linear(input_dim, hidden_1),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_1, hidden_2),
+            nn.LeakyReLU(0.2)
         )
         
-        self.fc_mu = nn.Linear(64, latent_dim)
-        self.fc_logvar = nn.Linear(64, latent_dim)
+        self.fc_mu = nn.Linear(hidden_2, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_2, latent_dim)
         
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 128),
-            nn.ReLU(),
-            nn.Linear(128, input_dim)
+            nn.Linear(latent_dim, hidden_2),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_2, hidden_1),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_1, input_dim)
         )
     
-    ##Encoder
     def encode(self, x):
         h = self.encoder(x)
         mu = self.fc_mu(h)
@@ -40,12 +41,11 @@ class VAE(nn.Module):
         return mu, logvar
     
     def reparameterize(self, mu, logvar):
+        logvar = torch.clamp(logvar, min=-10, max=10)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
     
-
-    ## Decoder
     def decode(self, z):
         return self.decoder(z)
     
@@ -55,13 +55,11 @@ class VAE(nn.Module):
         x_recon = self.decode(z)
         return x_recon, mu, logvar
 
-## Loss function
 def vae_loss(x_recon, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(x_recon, x, reduction='sum')
     kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kld_loss
 
-## Independent of dataset
 class Fraud_Dataset(Dataset):
     def __init__(self, X, y=None):
         self.X = torch.FloatTensor(X)
@@ -75,7 +73,6 @@ class Fraud_Dataset(Dataset):
             return self.X[idx], self.y[idx]
         return self.X[idx]
 
-## Find if it's fraud or not
 class Fraud_Classifier:
     def __init__(self, data_path, target_column, id_columns=None, merge_files=None,
                  test_data_path=None, test_merge_files=None, test_size=0.2,
@@ -97,59 +94,88 @@ class Fraud_Classifier:
         self.model = None
         self.threshold = None
         
-    ## Load dataset from multiple files / diffrent class and so on for generalization
     def load_data(self):
         df = pd.read_csv(self.data_path)
-    
+        
         for merge_info in self.merge_files:
             df_merge = pd.read_csv(merge_info['path'])
             df = df.merge(df_merge, on=merge_info['on'], how='left')
-    
+        
         y = df[self.target_column].values
         X = df.drop([self.target_column], axis=1)
-    
+        
         for id_col in self.id_columns:
             if id_col in X.columns:
                 X = X.drop([id_col], axis=1)
-    
-    # Encode categorical
+        
         for col in X.select_dtypes(include=['object']).columns:
             X[col] = X[col].factorize()[0]
             X[col] = X[col].replace(-1, np.nan)
-    
+        
+        missing_pct = X.isnull().sum() / len(X)
+        cols_to_keep = missing_pct[missing_pct <= 0.8].index
+        X = X[cols_to_keep]
+        
         if self.test_data_path is not None:
-        # ... same test loading code ...
+            df_test = pd.read_csv(self.test_data_path)
+            
+            for merge_info in self.test_merge_files:
+                df_test_merge = pd.read_csv(merge_info['path'])
+                df_test = df_test.merge(df_test_merge, on=merge_info['on'], how='left')
+            
+            if self.target_column in df_test.columns:
+                y_test = df_test[self.target_column].values
+                X_test = df_test.drop([self.target_column], axis=1)
+            else:
+                y_test = None
+                X_test = df_test
+            
+            for id_col in self.id_columns:
+                if id_col in X_test.columns:
+                    X_test = X_test.drop([id_col], axis=1)
+            
+            for col in X_test.select_dtypes(include=['object']).columns:
+                X_test[col] = X_test[col].factorize()[0]
+                X_test[col] = X_test[col].replace(-1, np.nan)
+            
+            X_test = X_test[cols_to_keep]
+            
             X_train = X
             y_train = y
         else:
-                X_train, X_test, y_train, y_test = train_test_split(
+            X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=self.test_size, random_state=self.random_state, stratify=y
             )
-    
+        
         X_train = X_train.values
         X_test = X_test.values
-    
+        
         X_train_normal = X_train[y_train == 0]
-    
-    # Calculate median for each feature from NORMAL training data
+        
         medians = np.nanmedian(X_train_normal, axis=0)
-    
-    # Impute NaN with median
+        
         for i in range(X_train_normal.shape[1]):
             mask = np.isnan(X_train_normal[:, i])
-            X_train_normal[mask, i] = medians[i]
-    
+            if np.isnan(medians[i]):
+                X_train_normal[:, i] = 0
+            else:
+                X_train_normal[mask, i] = medians[i]
+        
         for i in range(X_test.shape[1]):
             mask = np.isnan(X_test[:, i])
-            X_test[mask, i] = medians[i]
-    
-        # Scaling
+            if np.isnan(medians[i]):
+                X_test[:, i] = 0
+            else:
+                X_test[mask, i] = medians[i]
+        
         X_train_normal = self.scaler.fit_transform(X_train_normal)
         X_test = self.scaler.transform(X_test)
-    
+        
+        X_train_normal = np.nan_to_num(X_train_normal, nan=0.0, posinf=0.0, neginf=0.0)
+        X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
+        
         return X_train_normal, X_test, y_test
     
-    ## Train the baseline
     def train(self):
         X_train_normal, X_test, y_test = self.load_data()
         
@@ -162,7 +188,6 @@ class Fraud_Classifier:
         
         self.model.train()
         for epoch in range(self.epochs):
-            total_loss = 0
             for batch_x in train_loader:
                 batch_x = batch_x.to(self.device)
                 
@@ -170,9 +195,8 @@ class Fraud_Classifier:
                 x_recon, mu, logvar = self.model(batch_x)
                 loss = vae_loss(x_recon, batch_x, mu, logvar)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
-                
-                total_loss += loss.item()
         
         self.model.eval()
         with torch.no_grad():
@@ -183,8 +207,6 @@ class Fraud_Classifier:
         
         return X_test, y_test
     
-
-    ## Construct statistics
     def evaluate(self, X_test, y_test, output_name=None):
         if y_test is None:
             return
@@ -198,8 +220,6 @@ class Fraud_Classifier:
             X_test_tensor = torch.FloatTensor(X_test).to(self.device)
             x_recon, _, _ = self.model(X_test_tensor)
             recon_errors = torch.mean((X_test_tensor - x_recon) ** 2, dim=1).cpu().numpy()
-        
-        recon_errors = np.nan_to_num(recon_errors, nan=1e10, posinf=1e10, neginf=0.0)
         
         y_pred = (recon_errors > self.threshold).astype(int)
         
@@ -215,29 +235,23 @@ class Fraud_Classifier:
         
         os.makedirs('src/baseline/results', exist_ok=True)
         
-        ## Statistics for documentation
         with open(f'src/baseline/results/{output_name}.txt', 'w') as f:
             f.write(f"Baseline for {output_name} file:\n\n")
             
-            ## Classic
             f.write("Classification Metrics:\n")
             f.write(f"Accuracy:           {accuracy:.4f}\n")
             f.write(f"Precision:          {precision:.4f}\n")
             f.write(f"Recall:             {recall:.4f}\n")
             f.write(f"F1-Score:           {f1:.4f}\n\n")
             
-            ## Anomaly
-            f.write("Anomaly scoring:\n")
+            f.write("Anomaly Scoring:\n")
             f.write(f"ROC-AUC:            {roc_auc:.4f}\n")
             f.write(f"PR-AUC:             {pr_auc:.4f}\n\n")
             
-            ## Confusion Matrix
             f.write("Confusion Matrix:\n")
             f.write(f"TN:     {tn}\n")
-            f.write(f"FP:    {fp}\n")
-            f.write(f"FN:    {fn}\n")
+            f.write(f"FP:     {fp}\n")
+            f.write(f"FN:     {fn}\n")
             f.write(f"TP:     {tp}\n\n")
             
-
-            ## If error > than it's probably fraud
-            f.write(f"Threshold:{self.threshold:.6f}")
+            f.write(f"Threshold: {self.threshold:.6f}\n")

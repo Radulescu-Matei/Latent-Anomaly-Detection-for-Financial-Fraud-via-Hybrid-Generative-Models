@@ -1,0 +1,19 @@
+Baseline for vae_baseline_train_transaction file:
+
+Classification Metrics:
+Accuracy:           0.9306
+Precision:          0.2232
+Recall:             0.3963
+F1-Score:           0.2855
+
+Anomaly Scoring:
+ROC-AUC:            0.7708
+PR-AUC:             0.2341
+
+Confusion Matrix:
+TN:     108273
+FP:     5702
+FN:     2495
+TP:     1638
+
+Threshold: 0.266033
