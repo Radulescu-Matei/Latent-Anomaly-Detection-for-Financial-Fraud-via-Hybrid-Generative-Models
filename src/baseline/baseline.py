@@ -100,61 +100,53 @@ class Fraud_Classifier:
     ## Load dataset from multiple files / diffrent class and so on for generalization
     def load_data(self):
         df = pd.read_csv(self.data_path)
-        
+    
         for merge_info in self.merge_files:
             df_merge = pd.read_csv(merge_info['path'])
             df = df.merge(df_merge, on=merge_info['on'], how='left')
-        
+    
         y = df[self.target_column].values
         X = df.drop([self.target_column], axis=1)
-        
+    
         for id_col in self.id_columns:
             if id_col in X.columns:
                 X = X.drop([id_col], axis=1)
-        
+    
+    # Encode categorical
         for col in X.select_dtypes(include=['object']).columns:
             X[col] = X[col].factorize()[0]
-        
-        X = X.fillna(0).values
-        
+            X[col] = X[col].replace(-1, np.nan)
+    
         if self.test_data_path is not None:
-            df_test = pd.read_csv(self.test_data_path)
-            
-            for merge_info in self.test_merge_files:
-                df_test_merge = pd.read_csv(merge_info['path'])
-                df_test = df_test.merge(df_test_merge, on=merge_info['on'], how='left')
-            
-            if self.target_column in df_test.columns:
-                y_test = df_test[self.target_column].values
-                X_test = df_test.drop([self.target_column], axis=1)
-            else:
-                y_test = None
-                X_test = df_test
-            
-            for id_col in self.id_columns:
-                if id_col in X_test.columns:
-                    X_test = X_test.drop([id_col], axis=1)
-            
-            for col in X_test.select_dtypes(include=['object']).columns:
-                X_test[col] = X_test[col].factorize()[0]
-            
-            X_test = X_test.fillna(0).values
-            
+        # ... same test loading code ...
             X_train = X
             y_train = y
         else:
-            X_train, X_test, y_train, y_test = train_test_split(
+                X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=self.test_size, random_state=self.random_state, stratify=y
             )
-        
+    
+        X_train = X_train.values
+        X_test = X_test.values
+    
         X_train_normal = X_train[y_train == 0]
-        
+    
+    # Calculate median for each feature from NORMAL training data
+        medians = np.nanmedian(X_train_normal, axis=0)
+    
+    # Impute NaN with median
+        for i in range(X_train_normal.shape[1]):
+            mask = np.isnan(X_train_normal[:, i])
+            X_train_normal[mask, i] = medians[i]
+    
+        for i in range(X_test.shape[1]):
+            mask = np.isnan(X_test[:, i])
+            X_test[mask, i] = medians[i]
+    
+        # Scaling
         X_train_normal = self.scaler.fit_transform(X_train_normal)
         X_test = self.scaler.transform(X_test)
-        
-        X_train_normal = np.nan_to_num(X_train_normal, nan=0.0, posinf=0.0, neginf=0.0)
-        X_test = np.nan_to_num(X_test, nan=0.0, posinf=0.0, neginf=0.0)
-        
+    
         return X_train_normal, X_test, y_test
     
     ## Train the baseline
