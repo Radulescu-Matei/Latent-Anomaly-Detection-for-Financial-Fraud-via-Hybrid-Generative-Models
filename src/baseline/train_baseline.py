@@ -17,7 +17,7 @@ if __name__ == "__main__":
             merge_files=[
                 {'path': 'Datasets/train_identity.csv', 'on': 'TransactionID'}
             ],
-            test_size=0.2,  # ← Split train_transaction.csv into train/test
+            test_size=0.2,
             epochs=50
         )
         X_test_ieee, y_test_ieee = vae_ieee.train()

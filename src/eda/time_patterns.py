@@ -37,3 +37,37 @@ ax2.grid(alpha=0.3)
 plt.tight_layout()
 plt.savefig('src/eda/graphs/creditcard_time_analysis.png', dpi=300, bbox_inches='tight')
 plt.close()
+
+# IEEE Dataset
+df_ieee = pd.read_csv('Datasets/train_transaction.csv')
+
+time_bins_ieee = np.linspace(df_ieee['TransactionDT'].min(), df_ieee['TransactionDT'].max(), 49)
+df_ieee['TimeBin'] = pd.cut(df_ieee['TransactionDT'], bins=time_bins_ieee)
+
+fraud_by_bin_ieee = df_ieee[df_ieee['isFraud'] == 1].groupby('TimeBin').size()
+normal_by_bin_ieee = df_ieee[df_ieee['isFraud'] == 0].groupby('TimeBin').size()
+
+bin_centers_ieee = [(interval.left + interval.right) / 2 for interval in fraud_by_bin_ieee.index]
+
+fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+
+ax1 = axes[0]
+ax1.plot(bin_centers_ieee, fraud_by_bin_ieee.values, color='#e74c3c', linewidth=2, marker='o', markersize=4, label='Fraud')
+ax1.plot(bin_centers_ieee, normal_by_bin_ieee.values, color='#2ecc71', linewidth=2, marker='o', markersize=4, label='Normal')
+ax1.set_xlabel('Time Delta (seconds)', fontsize=12, fontweight='bold')
+ax1.set_ylabel('Number of Transactions', fontsize=12, fontweight='bold')
+ax1.set_title('IEEE Dataset: Transaction Distribution Over Time', fontsize=14, fontweight='bold')
+ax1.legend(fontsize=11)
+ax1.grid(alpha=0.3)
+
+ax2 = axes[1]
+fraud_rate_by_bin_ieee = df_ieee.groupby('TimeBin')['isFraud'].mean() * 100
+ax2.plot(bin_centers_ieee, fraud_rate_by_bin_ieee.values, color='#e67e22', linewidth=2, marker='o', markersize=4)
+ax2.set_xlabel('Time Delta (seconds)', fontsize=12, fontweight='bold')
+ax2.set_ylabel('Fraud Rate (%)', fontsize=12, fontweight='bold')
+ax2.set_title('IEEE Dataset: Fraud Rate Over Time', fontsize=14, fontweight='bold')
+ax2.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('src/eda/graphs/IEEE_time_analysis.png', dpi=300, bbox_inches='tight')
+plt.close()
