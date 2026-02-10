@@ -7,6 +7,11 @@ The project will be developed step by step. It will start with simple baseline m
 FROM PARENT DIRECTORY :
 RUN EDA:
 python3 src/eda/class_imbalance.py
-
+python3 src/eda/feature_correlation.py
+python3 src/eda/mising_values.py - This is on IEEE dataset only ast the credit card dataset has no missing values.
+python3 src/eda/outliers.py
+python3 src/eda/time_patterns.py
+python3 src/eda/transaction_amount_analysis
 TRAIN BASELINE:
+src/baseline/baseline.py - has the actual model which by changing parameters is evaluated on diffrent dataset.
 python3 src/baseline/train_baseline.py
