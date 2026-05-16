@@ -20,6 +20,14 @@ _REAL = 0.9
 _FAKE = 0.1
 
 
+class DatasetConfig:
+    def __init__(self, data_path, target_column, id_columns=None, merge_files=None):
+        self.data_path = data_path
+        self.target_column = target_column
+        self.id_columns = id_columns or []
+        self.merge_files = merge_files or []
+
+
 class FraudDataset(Dataset):
     def __init__(self, X):
         self.X = torch.FloatTensor(X)
@@ -32,17 +40,12 @@ class FraudDataset(Dataset):
 
 
 class FraudDetector:
-    def __init__(self, data_path, target_column, id_columns=None, merge_files=None,
-                 test_data_path=None, test_merge_files=None, test_size=0.2,
+    def __init__(self, datasets, name='model', test_size=0.2,
                  latent_dim=32, batch_size=256, epochs=100,
                  lr_recon=1e-3, lr_disc=1e-4, lr_gen=1e-4,
                  threshold_percentile=95, random_state=42):
-        self.data_path = data_path
-        self.target_column = target_column
-        self.id_columns = id_columns or []
-        self.merge_files = merge_files or []
-        self.test_data_path = test_data_path
-        self.test_merge_files = test_merge_files or []
+        self.datasets = datasets
+        self.name = name
         self.test_size = test_size
         self.latent_dim = latent_dim
         self.batch_size = batch_size
@@ -82,62 +85,65 @@ class FraudDetector:
             X_values[mask, i] = fill
         return X_values
 
-    def load_data(self):
-        df = pd.read_csv(self.data_path)
-        for m in self.merge_files:
+    def _load_single(self, cfg):
+        df = pd.read_csv(cfg.data_path)
+        for m in cfg.merge_files:
             df = df.merge(pd.read_csv(m['path']), on=m['on'], how='left')
-
-        y = df[self.target_column].values
-        X = df.drop([self.target_column], axis=1)
-        for col in self.id_columns:
+        y = df[cfg.target_column].values
+        X = df.drop(cfg.target_column, axis=1)
+        for col in cfg.id_columns:
             if col in X.columns:
                 X = X.drop(col, axis=1)
-
         X = self._encode_categoricals(X)
-        X = self._add_missing_indicators(X, fit=True)
-        missing_pct = X.isnull().sum() / len(X)
-        self.cols_to_keep = missing_pct[missing_pct <= 0.8].index
-        X = X[self.cols_to_keep]
+        return X, y
 
-        if self.test_data_path is not None:
-            df_test = pd.read_csv(self.test_data_path)
-            for m in self.test_merge_files:
-                df_test = df_test.merge(pd.read_csv(m['path']), on=m['on'], how='left')
+    def _combine_datasets(self):
+        parts_X, parts_y = [], []
+        for cfg in self.datasets:
+            X, y = self._load_single(cfg)
+            parts_X.append(X)
+            parts_y.append(y)
+        X_all = pd.concat(parts_X, axis=0, ignore_index=True, sort=False)
+        y_all = np.concatenate(parts_y)
+        return X_all, y_all
 
-            if self.target_column in df_test.columns:
-                y_test = df_test[self.target_column].values
-                X_test = df_test.drop([self.target_column], axis=1)
-            else:
-                y_test = None
-                X_test = df_test.copy()
+    def _preprocess(self, X_all, y_all, fit=True):
+        X_all = self._add_missing_indicators(X_all, fit=fit)
+        if fit:
+            missing_pct = X_all.isnull().sum() / len(X_all)
+            self.cols_to_keep = missing_pct[missing_pct <= 0.8].index
+        X_all = X_all[self.cols_to_keep]
 
-            for col in self.id_columns:
-                if col in X_test.columns:
-                    X_test = X_test.drop(col, axis=1)
-            X_test = self._encode_categoricals(X_test)
-            X_test = self._add_missing_indicators(X_test, fit=False)
-            X_test = X_test[self.cols_to_keep]
+        X_train, X_test_df, y_train, y_test = train_test_split(
+            X_all, y_all,
+            test_size=self.test_size,
+            random_state=self.random_state,
+            stratify=y_all,
+        )
 
-            X_train_normal = X[y == 0].values
-            X_test_values = X_test.values
-        else:
-            X_train, X_test_df, y_train, y_test = train_test_split(
-                X, y, test_size=self.test_size, random_state=self.random_state, stratify=y
-            )
-            X_train_normal = X_train[y_train == 0].values
-            X_test_values = X_test_df.values
+        X_train_normal = X_train[y_train == 0].values
+        X_test_values = X_test_df.values
 
-        self.medians = np.nanmedian(X_train_normal, axis=0)
+        if fit:
+            self.medians = np.nanmedian(X_train_normal, axis=0)
+
         X_train_normal = self._fill_missing(X_train_normal)
         X_test_values = self._fill_missing(X_test_values)
 
-        X_train_normal = self.scaler.fit_transform(X_train_normal)
+        if fit:
+            X_train_normal = self.scaler.fit_transform(X_train_normal)
+        else:
+            X_train_normal = self.scaler.transform(X_train_normal)
         X_test_values = self.scaler.transform(X_test_values)
 
         X_train_normal = np.nan_to_num(X_train_normal, nan=0.0, posinf=0.0, neginf=0.0)
         X_test_values = np.nan_to_num(X_test_values, nan=0.0, posinf=0.0, neginf=0.0)
 
         return X_train_normal, X_test_values, y_test
+
+    def load_data(self):
+        X_all, y_all = self._combine_datasets()
+        return self._preprocess(X_all, y_all, fit=True)
 
     def train(self):
         print(f"Device: {self.device}")
@@ -172,7 +178,6 @@ class FraudDetector:
                 batch_x = batch_x.to(self.device)
                 n = batch_x.size(0)
 
-                # --- Phase 1: Reconstruction ---
                 opt_recon.zero_grad()
                 z = self.model.encode(batch_x)
                 x_recon = self.model.decode(z)
@@ -181,11 +186,9 @@ class FraudDetector:
                 torch.nn.utils.clip_grad_norm_(enc_dec_params, max_norm=1.0)
                 opt_recon.step()
 
-                # --- Phase 2a: Discriminator ---
                 opt_disc.zero_grad()
                 z_prior = torch.randn(n, self.latent_dim, device=self.device)
                 z_fake  = self.model.encode(batch_x).detach()
-
                 d_real = self.model.discriminate(z_prior)
                 d_fake = self.model.discriminate(z_fake)
                 disc_loss = (F.binary_cross_entropy(d_real, torch.full_like(d_real, _REAL)) +
@@ -194,7 +197,6 @@ class FraudDetector:
                 torch.nn.utils.clip_grad_norm_(self.model.discriminator.parameters(), max_norm=1.0)
                 opt_disc.step()
 
-                # --- Phase 2b: Generator (encoder adversarial) ---
                 opt_gen.zero_grad()
                 z_fake  = self.model.encode(batch_x)
                 d_fake  = self.model.discriminate(z_fake)
@@ -218,7 +220,6 @@ class FraudDetector:
                       f"gen={total_gen/n_batches:.4f}  "
                       f"lr={lr_now:.6f}")
 
-        # Threshold: percentile of reconstruction errors on normal training data
         self.model.eval()
         with torch.no_grad():
             X_tensor = torch.FloatTensor(X_train_normal).to(self.device)
@@ -227,56 +228,31 @@ class FraudDetector:
             self.threshold = np.percentile(recon_errors, self.threshold_percentile)
 
         print(f"Threshold ({self.threshold_percentile}th pct): {self.threshold:.6f}")
-
-        dataset_name = os.path.basename(self.data_path).replace('.csv', '')
-        self.save_checkpoint(f'src/model/checkpoints/aae_{dataset_name}.pt')
+        self.save_checkpoint(f'src/model/checkpoints/aae_{self.name}.pt')
         return X_test, y_test
 
     def save_checkpoint(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({
-            'model_state':         self.model.state_dict(),
-            'input_dim':           self.model.encoder.net[0].in_features,
-            'latent_dim':          self.latent_dim,
-            'scaler':              self.scaler,
-            'medians':             self.medians,
-            'cols_to_keep':        list(self.cols_to_keep),
-            'indicator_cols':      self.indicator_cols,
-            'threshold':           self.threshold,
+            'model_state':          self.model.state_dict(),
+            'input_dim':            self.model.encoder.net[0].in_features,
+            'latent_dim':           self.latent_dim,
+            'scaler':               self.scaler,
+            'medians':              self.medians,
+            'cols_to_keep':         list(self.cols_to_keep),
+            'indicator_cols':       self.indicator_cols,
+            'threshold':            self.threshold,
             'threshold_percentile': self.threshold_percentile,
         }, path)
         print(f"Checkpoint saved -> {path}")
 
-    def load_full_data(self):
-        """All samples (both classes) through the already-fitted preprocessing pipeline.
-        Must be called after train() so scaler/medians are ready."""
-        df = pd.read_csv(self.data_path)
-        for m in self.merge_files:
-            df = df.merge(pd.read_csv(m['path']), on=m['on'], how='left')
-
-        y = df[self.target_column].values
-        X = df.drop([self.target_column], axis=1)
-        for col in self.id_columns:
-            if col in X.columns:
-                X = X.drop(col, axis=1)
-
-        X = self._encode_categoricals(X)
-        X = self._add_missing_indicators(X, fit=False)
-        X = X[self.cols_to_keep]
-        X_values = X.values
-        X_values = self._fill_missing(X_values)
-        X_values = self.scaler.transform(X_values)
-        X_values = np.nan_to_num(X_values, nan=0.0, posinf=0.0, neginf=0.0)
-        return X_values, y
-
     def evaluate(self, X_test, y_test, output_name=None):
+        if output_name is None:
+            output_name = f'aae_results_{self.name}'
+
         if y_test is None:
             print("No labels available — skipping evaluation.")
             return
-
-        if output_name is None:
-            dataset_name = os.path.basename(self.data_path).replace('.csv', '')
-            output_name = f'aae_{dataset_name}'
 
         self.model.eval()
         with torch.no_grad():
@@ -322,26 +298,28 @@ class FraudDetector:
 
 
 if __name__ == "__main__":
-    aae_cc = FraudDetector(
-        data_path='Datasets/creditcard.csv',
-        target_column='Class',
-        test_size=0.2,
+    detector_cc = FraudDetector(
+        datasets=[DatasetConfig(
+            data_path='Datasets/creditcard.csv',
+            target_column='Class',
+        )],
+        name='creditcard',
         latent_dim=16,
         epochs=100,
     )
-    X_test_cc, y_test_cc = aae_cc.train()
-    aae_cc.evaluate(X_test_cc, y_test_cc)
+    X_test_cc, y_test_cc = detector_cc.train()
+    detector_cc.evaluate(X_test_cc, y_test_cc)
 
-    aae_ieee = FraudDetector(
-        data_path='Datasets/train_transaction.csv',
-        target_column='isFraud',
-        id_columns=['TransactionID'],
-        merge_files=[
-            {'path': 'Datasets/train_identity.csv', 'on': 'TransactionID'}
-        ],
-        test_size=0.2,
+    detector_ieee = FraudDetector(
+        datasets=[DatasetConfig(
+            data_path='Datasets/train_transaction.csv',
+            target_column='isFraud',
+            id_columns=['TransactionID'],
+            merge_files=[{'path': 'Datasets/train_identity.csv', 'on': 'TransactionID'}],
+        )],
+        name='ieee',
         latent_dim=64,
         epochs=100,
     )
-    X_test_ieee, y_test_ieee = aae_ieee.train()
-    aae_ieee.evaluate(X_test_ieee, y_test_ieee)
+    X_test_ieee, y_test_ieee = detector_ieee.train()
+    detector_ieee.evaluate(X_test_ieee, y_test_ieee)
