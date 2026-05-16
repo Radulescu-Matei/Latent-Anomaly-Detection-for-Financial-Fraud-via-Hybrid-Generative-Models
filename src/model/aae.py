@@ -65,6 +65,7 @@ class AAE(nn.Module):
     def __init__(self, input_dim, latent_dim=32):
         super().__init__()
         hidden_dims = [
+            max(512, input_dim),
             max(256, input_dim // 2),
             max(128, input_dim // 4),
             max(64,  input_dim // 8),
