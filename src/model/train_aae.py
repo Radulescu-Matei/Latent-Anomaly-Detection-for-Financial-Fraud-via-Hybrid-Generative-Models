@@ -62,6 +62,8 @@ class FraudDetector:
         self.cols_to_keep = None
         self.medians = None
         self.indicator_cols = None
+        self.recon_min = self.recon_max = None
+        self.disc_min  = self.disc_max  = None
 
     def _encode_categoricals(self, X):
         for col in X.select_dtypes(include=['object']).columns:
@@ -73,9 +75,13 @@ class FraudDetector:
         if fit:
             missing_pct = X.isnull().mean()
             self.indicator_cols = missing_pct[missing_pct > 0.05].index.tolist()
-        for col in self.indicator_cols:
-            if col in X.columns:
-                X[f'{col}_missing'] = X[col].isnull().astype(float)
+        cols = [col for col in self.indicator_cols if col in X.columns]
+        if cols:
+            indicators = pd.DataFrame(
+                {f'{col}_missing': X[col].isnull().astype(float) for col in cols},
+                index=X.index,
+            )
+            X = pd.concat([X, indicators], axis=1)
         return X
 
     def _fill_missing(self, X_values):
@@ -144,6 +150,11 @@ class FraudDetector:
     def load_data(self):
         X_all, y_all = self._combine_datasets()
         return self._preprocess(X_all, y_all, fit=True)
+
+    def _combined_score(self, recon_errors, disc_scores):
+        recon_norm = (recon_errors - self.recon_min) / (self.recon_max - self.recon_min + 1e-8)
+        disc_norm  = (disc_scores  - self.disc_min)  / (self.disc_max  - self.disc_min  + 1e-8)
+        return recon_norm + (1 - disc_norm)
 
     def train(self):
         print(f"Device: {self.device}")
@@ -222,10 +233,16 @@ class FraudDetector:
 
         self.model.eval()
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X_train_normal).to(self.device)
-            x_recon  = self.model.reconstruct(X_tensor)
+            X_tensor    = torch.FloatTensor(X_train_normal).to(self.device)
+            z           = self.model.encode(X_tensor)
+            x_recon     = self.model.decode(z)
             recon_errors = torch.mean((X_tensor - x_recon) ** 2, dim=1).cpu().numpy()
-            self.threshold = np.percentile(recon_errors, self.threshold_percentile)
+            disc_scores  = self.model.discriminate(z).squeeze().cpu().numpy()
+
+        self.recon_min, self.recon_max = recon_errors.min(), recon_errors.max()
+        self.disc_min,  self.disc_max  = disc_scores.min(),  disc_scores.max()
+        train_scores = self._combined_score(recon_errors, disc_scores)
+        self.threshold = np.percentile(train_scores, self.threshold_percentile)
 
         print(f"Threshold ({self.threshold_percentile}th pct): {self.threshold:.6f}")
         self.save_checkpoint(f'src/model/checkpoints/aae_{self.name}.pt')
@@ -243,6 +260,10 @@ class FraudDetector:
             'indicator_cols':       self.indicator_cols,
             'threshold':            self.threshold,
             'threshold_percentile': self.threshold_percentile,
+            'recon_min':            self.recon_min,
+            'recon_max':            self.recon_max,
+            'disc_min':             self.disc_min,
+            'disc_max':             self.disc_max,
         }, path)
         print(f"Checkpoint saved -> {path}")
 
@@ -256,18 +277,21 @@ class FraudDetector:
 
         self.model.eval()
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X_test).to(self.device)
-            x_recon  = self.model.reconstruct(X_tensor)
+            X_tensor     = torch.FloatTensor(X_test).to(self.device)
+            z            = self.model.encode(X_tensor)
+            x_recon      = self.model.decode(z)
             recon_errors = torch.mean((X_tensor - x_recon) ** 2, dim=1).cpu().numpy()
+            disc_scores  = self.model.discriminate(z).squeeze().cpu().numpy()
 
-        y_pred = (recon_errors > self.threshold).astype(int)
+        anomaly_scores = self._combined_score(recon_errors, disc_scores)
+        y_pred = (anomaly_scores > self.threshold).astype(int)
 
         precision = precision_score(y_test, y_pred, zero_division=0)
         recall    = recall_score(y_test, y_pred, zero_division=0)
         f1        = f1_score(y_test, y_pred, zero_division=0)
         accuracy  = accuracy_score(y_test, y_pred)
-        roc_auc   = roc_auc_score(y_test, recon_errors)
-        pr_auc    = average_precision_score(y_test, recon_errors)
+        roc_auc   = roc_auc_score(y_test, anomaly_scores)
+        pr_auc    = average_precision_score(y_test, anomaly_scores)
         cm        = confusion_matrix(y_test, y_pred)
         tn, fp, fn, tp = cm.ravel()
 
@@ -305,7 +329,7 @@ if __name__ == "__main__":
         )],
         name='creditcard',
         latent_dim=16,
-        epochs=100,
+        epochs=150,
     )
     X_test_cc, y_test_cc = detector_cc.train()
     detector_cc.evaluate(X_test_cc, y_test_cc)
@@ -319,7 +343,7 @@ if __name__ == "__main__":
         )],
         name='ieee',
         latent_dim=64,
-        epochs=100,
+        epochs=200,
     )
     X_test_ieee, y_test_ieee = detector_ieee.train()
     detector_ieee.evaluate(X_test_ieee, y_test_ieee)
