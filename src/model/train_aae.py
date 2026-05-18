@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     confusion_matrix, roc_auc_score, precision_score,
     recall_score, f1_score, accuracy_score, average_precision_score,
@@ -16,6 +16,11 @@ from sklearn.metrics import (
 sys.path.insert(0, os.path.dirname(__file__))
 from aae import AAE
 
+# Discriminator labels (flipped vs standard AAE):
+# REAL = encoder outputs from training normals  → discriminator learns "what normal codes look like"
+# FAKE = random prior samples                   → discriminator learns to reject these as "not normal"
+# At test time: 1 - discriminator(z) is HIGH for fraud (unrecognised latent codes)
+#               and LOW for normals (recognised as training-normal codes).
 _REAL = 0.9
 _FAKE = 0.1
 
@@ -42,8 +47,9 @@ class FraudDataset(Dataset):
 class FraudDetector:
     def __init__(self, datasets, name='model', test_size=0.2,
                  latent_dim=32, batch_size=256, epochs=100,
-                 lr_recon=1e-3, lr_disc=1e-4, lr_gen=1e-4,
-                 threshold_percentile=95, random_state=42):
+                 lr_recon=1e-3, lr_disc=1e-4,
+                 threshold_percentile=99, kl_weight=1.0, latent_weight=0.5,
+                 random_state=42):
         self.datasets = datasets
         self.name = name
         self.test_size = test_size
@@ -52,21 +58,22 @@ class FraudDetector:
         self.epochs = epochs
         self.lr_recon = lr_recon
         self.lr_disc = lr_disc
-        self.lr_gen = lr_gen
         self.threshold_percentile = threshold_percentile
+        self.kl_weight = kl_weight
+        # Weight of the discriminator anomaly signal relative to reconstruction error.
+        # Combined score = recon_error + latent_weight * (1 - discriminator(mu))
+        self.latent_weight = latent_weight
         self.random_state = random_state
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.scaler = RobustScaler()
+        self.scaler = StandardScaler()
         self.model = None
         self.threshold = None
         self.cols_to_keep = None
         self.medians = None
         self.indicator_cols = None
-        self.recon_min = self.recon_max = None
-        self.disc_min  = self.disc_max  = None
 
     def _encode_categoricals(self, X):
-        for col in X.select_dtypes(include=['object']).columns:
+        for col in X.select_dtypes(include=['object', 'str']).columns:
             X[col] = X[col].factorize()[0]
             X[col] = X[col].replace(-1, np.nan)
         return X
@@ -147,14 +154,33 @@ class FraudDetector:
 
         return X_train_normal, X_test_values, y_test
 
+    def _anomaly_score(self, X_np):
+        """
+        Combined score: reconstruction error from the deterministic mu path
+        PLUS a discriminator signal.
+
+        The discriminator was trained to output HIGH (~0.9) for latent codes
+        that came from training normal transactions, and LOW (~0.1) for random
+        prior samples.  At test time, fraud latent codes are unfamiliar to the
+        discriminator → output is low → (1 - output) is high.
+
+        This adds a second independent signal on top of reconstruction error,
+        which is what the VAE baseline only has.
+        """
+        self.model.eval()
+        with torch.no_grad():
+            X_t = torch.FloatTensor(X_np).to(self.device)
+            mu    = self.model.encode(X_t)           # deterministic
+            x_r   = self.model.decode(mu)
+            recon = torch.mean((X_t - x_r) ** 2, dim=1)
+            disc  = self.model.discriminate(mu).squeeze(1)
+            # disc ≈ 0.9 for normals, ≈ 0.1 for non-normal-like codes
+            anomaly_disc = 1.0 - disc
+        return (recon + self.latent_weight * anomaly_disc).cpu().numpy()
+
     def load_data(self):
         X_all, y_all = self._combine_datasets()
         return self._preprocess(X_all, y_all, fit=True)
-
-    def _combined_score(self, recon_errors, disc_scores):
-        recon_norm = (recon_errors - self.recon_min) / (self.recon_max - self.recon_min + 1e-8)
-        disc_norm  = (disc_scores  - self.disc_min)  / (self.disc_max  - self.disc_min  + 1e-8)
-        return recon_norm + (1 - disc_norm)
 
     def train(self):
         print(f"Device: {self.device}")
@@ -162,6 +188,7 @@ class FraudDetector:
 
         input_dim = X_train_normal.shape[1]
         print(f"Input dim: {input_dim} | Normal training samples: {len(X_train_normal)}")
+        print(f"kl_weight={self.kl_weight} | latent_weight={self.latent_weight}")
 
         self.model = AAE(input_dim, self.latent_dim).to(self.device)
 
@@ -170,8 +197,6 @@ class FraudDetector:
         opt_recon = optim.Adam(enc_dec_params, lr=self.lr_recon, weight_decay=1e-5)
         opt_disc  = optim.Adam(self.model.discriminator.parameters(),
                                lr=self.lr_disc, betas=(0.5, 0.999))
-        opt_gen   = optim.Adam(self.model.encoder.parameters(),
-                               lr=self.lr_gen, betas=(0.5, 0.999))
 
         sched_recon = optim.lr_scheduler.ReduceLROnPlateau(
             opt_recon, patience=5, factor=0.5, min_lr=1e-6
@@ -183,42 +208,46 @@ class FraudDetector:
 
         for epoch in range(self.epochs):
             self.model.train()
-            total_recon = total_disc = total_gen = 0.0
+            total_recon = total_kl = total_disc = 0.0
 
             for batch_x in loader:
                 batch_x = batch_x.to(self.device)
                 n = batch_x.size(0)
 
+                # --- Phase 1: reconstruction + KL ---
+                # Stochastic encode so KL gradients flow through the encoder.
+                # KL forces each normal sample's code toward N(0,I) analytically,
+                # giving the tight normal manifold that drives good PR-AUC.
                 opt_recon.zero_grad()
-                z = self.model.encode(batch_x)
-                x_recon = self.model.decode(z)
+                mu, logvar, z = self.model.encode_stochastic(batch_x)
+                x_recon    = self.model.decode(z)
                 recon_loss = F.mse_loss(x_recon, batch_x, reduction='mean')
-                recon_loss.backward()
+                kl_loss    = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+                (recon_loss + self.kl_weight * kl_loss).backward()
                 torch.nn.utils.clip_grad_norm_(enc_dec_params, max_norm=1.0)
                 opt_recon.step()
 
+                # --- Phase 2: discriminator as normal-code detector ---
+                # REAL label = encoder mu from training normals (what normal codes look like)
+                # FAKE label = random prior samples
+                # No generator phase: the encoder is NOT trained to fool the discriminator.
+                # This means at test time the discriminator can flag fraud codes that the
+                # encoder produces from unseen fraud inputs.
                 opt_disc.zero_grad()
-                z_prior = torch.randn(n, self.latent_dim, device=self.device)
-                z_fake  = self.model.encode(batch_x).detach()
-                d_real = self.model.discriminate(z_prior)
-                d_fake = self.model.discriminate(z_fake)
+                with torch.no_grad():
+                    z_real = self.model.encode(batch_x)          # mu, detached
+                z_fake   = torch.randn(n, self.latent_dim, device=self.device)
+                d_real   = self.model.discriminate(z_real)
+                d_fake   = self.model.discriminate(z_fake)
                 disc_loss = (F.binary_cross_entropy(d_real, torch.full_like(d_real, _REAL)) +
                              F.binary_cross_entropy(d_fake, torch.full_like(d_fake, _FAKE)))
                 disc_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.discriminator.parameters(), max_norm=1.0)
                 opt_disc.step()
 
-                opt_gen.zero_grad()
-                z_fake  = self.model.encode(batch_x)
-                d_fake  = self.model.discriminate(z_fake)
-                gen_loss = F.binary_cross_entropy(d_fake, torch.ones_like(d_fake))
-                gen_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.encoder.parameters(), max_norm=1.0)
-                opt_gen.step()
-
                 total_recon += recon_loss.item()
+                total_kl    += kl_loss.item()
                 total_disc  += disc_loss.item()
-                total_gen   += gen_loss.item()
 
             n_batches = len(loader)
             sched_recon.step(total_recon / n_batches)
@@ -227,45 +256,14 @@ class FraudDetector:
                 lr_now = opt_recon.param_groups[0]['lr']
                 print(f"Epoch [{epoch+1:3d}/{self.epochs}]  "
                       f"recon={total_recon/n_batches:.4f}  "
+                      f"kl={total_kl/n_batches:.4f}  "
                       f"disc={total_disc/n_batches:.4f}  "
-                      f"gen={total_gen/n_batches:.4f}  "
                       f"lr={lr_now:.6f}")
 
-        self.model.eval()
-        with torch.no_grad():
-            X_tensor    = torch.FloatTensor(X_train_normal).to(self.device)
-            z           = self.model.encode(X_tensor)
-            x_recon     = self.model.decode(z)
-            recon_errors = torch.mean((X_tensor - x_recon) ** 2, dim=1).cpu().numpy()
-            disc_scores  = self.model.discriminate(z).squeeze().cpu().numpy()
-
-        self.recon_min, self.recon_max = recon_errors.min(), recon_errors.max()
-        self.disc_min,  self.disc_max  = disc_scores.min(),  disc_scores.max()
-        train_scores = self._combined_score(recon_errors, disc_scores)
-        self.threshold = np.percentile(train_scores, self.threshold_percentile)
-
+        scores_train = self._anomaly_score(X_train_normal)
+        self.threshold = np.percentile(scores_train, self.threshold_percentile)
         print(f"Threshold ({self.threshold_percentile}th pct): {self.threshold:.6f}")
-        self.save_checkpoint(f'src/model/checkpoints/aae_{self.name}.pt')
         return X_test, y_test
-
-    def save_checkpoint(self, path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({
-            'model_state':          self.model.state_dict(),
-            'input_dim':            self.model.encoder.net[0].in_features,
-            'latent_dim':           self.latent_dim,
-            'scaler':               self.scaler,
-            'medians':              self.medians,
-            'cols_to_keep':         list(self.cols_to_keep),
-            'indicator_cols':       self.indicator_cols,
-            'threshold':            self.threshold,
-            'threshold_percentile': self.threshold_percentile,
-            'recon_min':            self.recon_min,
-            'recon_max':            self.recon_max,
-            'disc_min':             self.disc_min,
-            'disc_max':             self.disc_max,
-        }, path)
-        print(f"Checkpoint saved -> {path}")
 
     def evaluate(self, X_test, y_test, output_name=None):
         if output_name is None:
@@ -275,15 +273,7 @@ class FraudDetector:
             print("No labels available — skipping evaluation.")
             return
 
-        self.model.eval()
-        with torch.no_grad():
-            X_tensor     = torch.FloatTensor(X_test).to(self.device)
-            z            = self.model.encode(X_tensor)
-            x_recon      = self.model.decode(z)
-            recon_errors = torch.mean((X_tensor - x_recon) ** 2, dim=1).cpu().numpy()
-            disc_scores  = self.model.discriminate(z).squeeze().cpu().numpy()
-
-        anomaly_scores = self._combined_score(recon_errors, disc_scores)
+        anomaly_scores = self._anomaly_score(X_test)
         y_pred = (anomaly_scores > self.threshold).astype(int)
 
         precision = precision_score(y_test, y_pred, zero_division=0)
@@ -313,8 +303,10 @@ class FraudDetector:
             f.write(f"FN:     {fn}\n")
             f.write(f"TP:     {tp}\n\n")
             f.write(f"Threshold ({self.threshold_percentile}th pct): {self.threshold:.6f}\n")
-            f.write(f"Latent dim:  {self.latent_dim}\n")
-            f.write(f"Epochs:      {self.epochs}\n")
+            f.write(f"kl_weight:     {self.kl_weight}\n")
+            f.write(f"latent_weight: {self.latent_weight}\n")
+            f.write(f"Latent dim:    {self.latent_dim}\n")
+            f.write(f"Epochs:        {self.epochs}\n")
 
         print(f"\nResults -> {out_path}")
         print(f"ROC-AUC: {roc_auc:.4f} | PR-AUC: {pr_auc:.4f} | "
@@ -328,8 +320,12 @@ if __name__ == "__main__":
             target_column='Class',
         )],
         name='creditcard',
-        latent_dim=16,
+        latent_dim=32,
+        batch_size=128,
         epochs=150,
+        threshold_percentile=99,
+        kl_weight=1.0,
+        latent_weight=2.5,
     )
     X_test_cc, y_test_cc = detector_cc.train()
     detector_cc.evaluate(X_test_cc, y_test_cc)
@@ -343,7 +339,11 @@ if __name__ == "__main__":
         )],
         name='ieee',
         latent_dim=64,
+        batch_size=128,
         epochs=200,
+        threshold_percentile=99,
+        kl_weight=1.0,
+        latent_weight=2.5,
     )
     X_test_ieee, y_test_ieee = detector_ieee.train()
     detector_ieee.evaluate(X_test_ieee, y_test_ieee)
