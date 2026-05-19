@@ -12,7 +12,6 @@ class Encoder(nn.Module):
             shared += [
                 nn.Linear(prev_dim, h_dim),
                 nn.LeakyReLU(0.2),
-                nn.Dropout(0.1),
             ]
             prev_dim = h_dim
         self.shared = nn.Sequential(*shared)
