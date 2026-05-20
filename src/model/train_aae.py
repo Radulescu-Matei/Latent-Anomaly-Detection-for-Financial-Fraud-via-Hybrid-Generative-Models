@@ -47,7 +47,7 @@ class FraudDetector:
     def __init__(self, datasets, name='model', test_size=0.2,
                  latent_dim=32, batch_size=256, epochs=100,
                  lr_recon=1e-3, lr_disc=3e-4,
-                 threshold_percentile=99, kl_weight=1.0, latent_weight=0.5,
+                 threshold_percentile=99,
                  n_disc_steps=1, random_state=42):
         self.datasets = datasets
         self.name = name
@@ -58,10 +58,6 @@ class FraudDetector:
         self.lr_recon = lr_recon
         self.lr_disc = lr_disc
         self.threshold_percentile = threshold_percentile
-        self.kl_weight = kl_weight
-        # Weight of the discriminator anomaly signal relative to reconstruction error.
-        # Combined score = recon_error + latent_weight * (1 - discriminator(mu))
-        self.latent_weight = latent_weight
         self.n_disc_steps = n_disc_steps
         self.random_state = random_state
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -154,7 +150,7 @@ class FraudDetector:
             disc  = self.model.discriminate(mu).squeeze(1)
             anomaly_disc = 1.0 - disc
             cos_term = 1 - F.cosine_similarity(X_t, x_r, dim=1)
-        return (recon + self.latent_weight * anomaly_disc + cos_term).cpu().numpy()
+        return (recon + anomaly_disc + cos_term).cpu().numpy()
 
     def load_data(self):
         X_all, y_all = self._load_single(self.datasets[0])
@@ -169,7 +165,6 @@ class FraudDetector:
 
         input_dim = X_train_normal.shape[1]
         print(f"Input dim: {input_dim} | Normal training samples: {len(X_train_normal)}")
-        print(f"kl_weight={self.kl_weight} | latent_weight={self.latent_weight}")
 
         self.model = AAE(input_dim, self.latent_dim).to(self.device)
 
@@ -206,7 +201,7 @@ class FraudDetector:
                 cos_loss   = (1 - F.cosine_similarity(x_recon, batch_x, dim=1)).mean()
                 recon_loss = recon_loss + cos_loss
                 kl_loss    = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-                (recon_loss + self.kl_weight * kl_loss).backward()
+                (recon_loss + kl_loss).backward()
                 torch.nn.utils.clip_grad_norm_(enc_dec_params, max_norm=1.0)
                 opt_recon.step()
 
@@ -282,8 +277,6 @@ class FraudDetector:
             f.write(f"FN:     {fn}\n")
             f.write(f"TP:     {tp}\n\n")
             f.write(f"Threshold ({self.threshold_percentile}th pct): {self.threshold:.6f}\n")
-            f.write(f"kl_weight:     {self.kl_weight}\n")
-            f.write(f"latent_weight: {self.latent_weight}\n")
             f.write(f"Latent dim:    {self.latent_dim}\n")
             f.write(f"Epochs:        {self.epochs}\n")
 
@@ -303,8 +296,6 @@ if __name__ == "__main__":
         batch_size=128,
         epochs=150,
         threshold_percentile=99,
-        kl_weight=1.0,
-        latent_weight=2.5,
     )
     X_test_cc, y_test_cc = detector_cc.train()
     detector_cc.evaluate(X_test_cc, y_test_cc)
