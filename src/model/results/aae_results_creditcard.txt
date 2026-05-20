@@ -1,23 +1,23 @@
 AAE Results for aae_results_creditcard:
 
 Classification Metrics:
-Accuracy:           0.9884
-Precision:          0.1163
-Recall:             0.8673
-F1-Score:           0.2051
+Accuracy:           0.9885
+Precision:          0.1162
+Recall:             0.8571
+F1-Score:           0.2046
 
 Anomaly Scoring:
-ROC-AUC:            0.9573
-PR-AUC:             0.3778
+ROC-AUC:            0.9586
+PR-AUC:             0.6809
 
 Confusion Matrix:
-TN:     56218
-FP:     646
-FN:     13
-TP:     85
+TN:     56225
+FP:     639
+FN:     14
+TP:     84
 
-Threshold (99th pct): 0.628023
+Threshold (99th pct): 0.444974
 kl_weight:     1.0
-latent_weight: 2.5
+latent_weight: 0.5
 Latent dim:    32
 Epochs:        150
