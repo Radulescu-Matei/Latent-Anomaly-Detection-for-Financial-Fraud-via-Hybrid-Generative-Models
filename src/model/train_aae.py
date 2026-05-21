@@ -48,7 +48,7 @@ class FraudDetector:
                  latent_dim=32, batch_size=256, epochs=100,
                  lr_recon=1e-3, lr_disc=3e-4,
                  threshold_percentile=99,
-                 n_disc_steps=1, random_state=42):
+                 n_disc_steps=1, gen_weight=0.0, random_state=42):
         self.datasets = datasets
         self.name = name
         self.test_size = test_size
@@ -59,6 +59,7 @@ class FraudDetector:
         self.lr_disc = lr_disc
         self.threshold_percentile = threshold_percentile
         self.n_disc_steps = n_disc_steps
+        self.gen_weight = gen_weight
         self.random_state = random_state
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.scaler = StandardScaler()
@@ -173,6 +174,8 @@ class FraudDetector:
         opt_recon = optim.Adam(enc_dec_params, lr=self.lr_recon, weight_decay=1e-5)
         opt_disc  = optim.Adam(self.model.discriminator.parameters(),
                                lr=self.lr_disc, betas=(0.5, 0.999))
+        opt_gen   = optim.Adam(self.model.encoder.parameters(),
+                               lr=self.lr_disc, betas=(0.5, 0.999))
 
         sched_recon = optim.lr_scheduler.ReduceLROnPlateau(
             opt_recon, patience=5, factor=0.5, min_lr=1e-6
@@ -200,7 +203,7 @@ class FraudDetector:
                 recon_loss = F.mse_loss(x_recon, batch_x, reduction='mean')
                 cos_loss   = (1 - F.cosine_similarity(x_recon, batch_x, dim=1)).mean()
                 recon_loss = recon_loss + cos_loss
-                kl_loss    = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+                kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
                 (recon_loss + kl_loss).backward()
                 torch.nn.utils.clip_grad_norm_(enc_dec_params, max_norm=1.0)
                 opt_recon.step()
@@ -218,6 +221,20 @@ class FraudDetector:
                     disc_loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.discriminator.parameters(), max_norm=1.0)
                     opt_disc.step()
+
+                # --- Phase 3: generator — encoder fools discriminator ---
+                # Encoder is trained to make its output codes look like N(0,I)
+                # (i.e. fool the discriminator into outputting _REAL for encoded normals).
+                # This tightens the latent manifold beyond what KL alone achieves.
+                gen_loss = torch.tensor(0.0, device=self.device)
+                if self.gen_weight > 0.0:
+                    z_gen = self.model.encode(batch_x)
+                    d_gen = self.model.discriminate(z_gen)
+                    gen_loss = F.binary_cross_entropy(d_gen, torch.full_like(d_gen, _REAL))
+                    opt_gen.zero_grad()
+                    (self.gen_weight * gen_loss).backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.encoder.parameters(), max_norm=1.0)
+                    opt_gen.step()
 
                 total_recon += recon_loss.item()
                 total_kl    += kl_loss.item()
@@ -296,6 +313,7 @@ if __name__ == "__main__":
         batch_size=128,
         epochs=150,
         threshold_percentile=99,
+        gen_weight=1.0,
     )
     X_test_cc, y_test_cc = detector_cc.train()
     detector_cc.evaluate(X_test_cc, y_test_cc)
@@ -312,8 +330,6 @@ if __name__ == "__main__":
         batch_size=128,
         epochs=200,
         threshold_percentile=99,
-        kl_weight=1.0,
-        latent_weight=2.5,
     )
     X_test_ieee, y_test_ieee = detector_ieee.train()
     detector_ieee.evaluate(X_test_ieee, y_test_ieee)
