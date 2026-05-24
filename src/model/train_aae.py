@@ -46,8 +46,7 @@ class FraudDetector:
                  latent_dim=32, batch_size=256, epochs=100,
                  lr_recon=1e-3, lr_disc=3e-4,
                  threshold_percentile=99,
-                 n_disc_steps=1, gen_weight=0.3,
-                 num_memory_slots=100, entropy_weight=0.0002,
+                 n_disc_steps=1, gen_weight=1.0, gen_warmup_epochs=50,
                  random_state=42):
         self.datasets = datasets
         self.name = name
@@ -60,8 +59,7 @@ class FraudDetector:
         self.threshold_percentile = threshold_percentile
         self.n_disc_steps = n_disc_steps
         self.gen_weight = gen_weight
-        self.num_memory_slots = num_memory_slots
-        self.entropy_weight = entropy_weight
+        self.gen_warmup_epochs = gen_warmup_epochs
         self.random_state = random_state
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.scaler = StandardScaler()
@@ -147,12 +145,11 @@ class FraudDetector:
         self.model.eval()
         with torch.no_grad():
             X_t        = torch.FloatTensor(X_np).to(self.device)
-            z          = self.model.encode(X_t)
-            z_hat, _   = self.model.read_memory(z)
-            x_r        = self.model.decode(z_hat)
-            recon      = torch.mean((X_t - x_r) ** 2, dim=1)
-            disc       = self.model.discriminate(z).squeeze(1)
-            cos_term   = 1 - F.cosine_similarity(X_t, x_r, dim=1)
+            z        = self.model.encode(X_t)
+            x_r      = self.model.decode(z)
+            recon    = torch.mean((X_t - x_r) ** 2, dim=1)
+            disc     = self.model.discriminate(z).squeeze(1)
+            cos_term = 1 - F.cosine_similarity(X_t, x_r, dim=1)
         return (recon + disc + cos_term).cpu().numpy()
 
     def load_data(self):
@@ -169,11 +166,10 @@ class FraudDetector:
         input_dim = X_train_normal.shape[1]
         print(f"Input dim: {input_dim} | Normal training samples: {len(X_train_normal)}")
 
-        self.model = AAE(input_dim, self.latent_dim, self.num_memory_slots).to(self.device)
+        self.model = AAE(input_dim, self.latent_dim).to(self.device)
 
         enc_dec_params = (list(self.model.encoder.parameters()) +
-                          list(self.model.decoder.parameters()) +
-                          list(self.model.memory.parameters()))
+                          list(self.model.decoder.parameters()))
         opt_recon = optim.Adam(enc_dec_params, lr=self.lr_recon, weight_decay=1e-5)
         opt_disc  = optim.Adam(self.model.discriminator.parameters(),
                                lr=self.lr_disc, betas=(0.5, 0.999))
@@ -196,18 +192,13 @@ class FraudDetector:
                 batch_x = batch_x.to(self.device)
                 n = batch_x.size(0)
 
-                # --- Phase 1: encode → memory read → decode ---
-                # Decoder reconstructs from memory slots, not raw z.
-                # Fraud codes don't match any normal prototype → poor reconstruction.
+                # --- Phase 1: reconstruction ---
                 opt_recon.zero_grad()
-                z = self.model.encode(batch_x)
-                z_hat, attn    = self.model.read_memory(z)
-                x_recon        = self.model.decode(z_hat)
-                recon_loss     = F.mse_loss(x_recon, batch_x, reduction='mean')
-                cos_loss       = (1 - F.cosine_similarity(x_recon, batch_x, dim=1)).mean()
-                entropy_loss   = (-attn * torch.log(attn + 1e-8)).sum(dim=1).mean()
-                total_enc_loss = recon_loss + cos_loss + self.entropy_weight * entropy_loss
-                total_enc_loss.backward()
+                z          = self.model.encode(batch_x)
+                x_recon    = self.model.decode(z)
+                recon_loss = F.mse_loss(x_recon, batch_x, reduction='mean')
+                cos_loss   = (1 - F.cosine_similarity(x_recon, batch_x, dim=1)).mean()
+                (recon_loss + cos_loss).backward()
                 torch.nn.utils.clip_grad_norm_(enc_dec_params, max_norm=1.0)
                 opt_recon.step()
 
@@ -226,7 +217,7 @@ class FraudDetector:
                     opt_disc.step()
 
                 # --- Phase 3: generator — encoder fools discriminator ---
-                if self.gen_weight > 0.0:
+                if self.gen_weight > 0.0 and epoch >= self.gen_warmup_epochs:
                     z_gen = self.model.encode(batch_x)
                     d_gen = self.model.discriminate(z_gen)
                     gen_loss = F.binary_cross_entropy(d_gen, torch.full_like(d_gen, _REAL))
@@ -310,9 +301,8 @@ if __name__ == "__main__":
         batch_size=128,
         epochs=150,
         threshold_percentile=99,
-        num_memory_slots=500,
-        entropy_weight=0.0002,
-        gen_weight=0.3,
+        gen_weight=1.0,
+        gen_warmup_epochs=50,
     )
     X_test_cc, y_test_cc = detector_cc.train()
     detector_cc.evaluate(X_test_cc, y_test_cc)
