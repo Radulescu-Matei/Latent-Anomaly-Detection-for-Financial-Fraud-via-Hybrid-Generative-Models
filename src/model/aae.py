@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Encoder(nn.Module):
@@ -42,19 +43,37 @@ class Decoder(nn.Module):
         return self.net(z)
 
 
+class MemoryModule(nn.Module):
+    def __init__(self, num_slots, latent_dim, shrink_threshold=0.0025):
+        super().__init__()
+        self.shrink_threshold = shrink_threshold
+        self.memory = nn.Parameter(torch.randn(num_slots, latent_dim))
+
+    def forward(self, z):
+        # Cosine similarity between query z and each memory slot
+        z_norm = F.normalize(z, dim=1)
+        m_norm = F.normalize(self.memory, dim=1)
+        attn = F.softmax(torch.matmul(z_norm, m_norm.t()), dim=1)
+        # Hard shrinkage — encourages sparse (focused) memory reads
+        attn = F.relu(attn - self.shrink_threshold)
+        attn = attn / (attn.sum(dim=1, keepdim=True) + 1e-8)
+        z_hat = torch.matmul(attn, self.memory)
+        return z_hat, attn
+
+
 class Discriminator(nn.Module):
     def __init__(self, latent_dim):
         super().__init__()
         h1 = max(64, latent_dim * 4)
         h2 = max(32, latent_dim * 2)
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, h1),
+            nn.utils.spectral_norm(nn.Linear(latent_dim, h1)),
             nn.LeakyReLU(0.2),
             nn.Dropout(0.2),
-            nn.Linear(h1, h2),
+            nn.utils.spectral_norm(nn.Linear(h1, h2)),
             nn.LeakyReLU(0.2),
             nn.Dropout(0.2),
-            nn.Linear(h2, 1),
+            nn.utils.spectral_norm(nn.Linear(h2, 1)),
             nn.Sigmoid(),
         )
 
@@ -63,7 +82,7 @@ class Discriminator(nn.Module):
 
 
 class AAE(nn.Module):
-    def __init__(self, input_dim, latent_dim=32):
+    def __init__(self, input_dim, latent_dim=32, num_memory_slots=100):
         super().__init__()
         hidden_dims = [
             max(256, input_dim // 2),
@@ -72,29 +91,19 @@ class AAE(nn.Module):
         ]
         self.encoder       = Encoder(input_dim, hidden_dims, latent_dim)
         self.decoder       = Decoder(latent_dim, hidden_dims, input_dim)
+        self.memory        = MemoryModule(num_memory_slots, latent_dim)
         self.discriminator = Discriminator(latent_dim)
         self.latent_dim    = latent_dim
 
     def encode(self, x):
-        """Deterministic path — returns mu. Used at inference for stable scoring."""
         mu, _ = self.encoder(x)
         return mu
-
-    def encode_stochastic(self, x):
-        """Stochastic path — returns (mu, logvar, z) via reparameterisation.
-        Used during training so KL gradients flow through the encoder."""
-        mu, logvar = self.encoder(x)
-        logvar = torch.clamp(logvar, -10, 10)
-        std = torch.exp(0.5 * logvar)
-        z   = mu + std * torch.randn_like(std)
-        return mu, logvar, z
 
     def decode(self, z):
         return self.decoder(z)
 
+    def read_memory(self, z):
+        return self.memory(z)
+
     def discriminate(self, z):
         return self.discriminator(z)
-
-    def reconstruct(self, x):
-        """Deterministic reconstruction via mu — used for anomaly scoring."""
-        return self.decoder(self.encode(x))
