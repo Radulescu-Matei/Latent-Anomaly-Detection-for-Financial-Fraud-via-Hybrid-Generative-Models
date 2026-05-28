@@ -1,21 +1,21 @@
 AAE Results for aae_results_ieee:
 
 Classification Metrics:
-Accuracy:           0.9623
-Precision:          0.4271
-Recall:             0.2262
-F1-Score:           0.2958
+Accuracy:           0.9581
+Precision:          0.1915
+Recall:             0.0612
+F1-Score:           0.0928
 
 Anomaly Scoring:
-ROC-AUC:            0.7613
-PR-AUC:             0.2569
+ROC-AUC:            0.6537
+PR-AUC:             0.0791
 
 Confusion Matrix:
-TN:     112721
-FP:     1254
-FN:     3198
-TP:     935
+TN:     112907
+FP:     1068
+FN:     3880
+TP:     253
 
-Threshold (99th pct): 0.882572
+Threshold (99th pct): 0.498615
 Latent dim:    64
 Epochs:        200
