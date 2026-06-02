@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import (
     confusion_matrix, roc_auc_score, precision_score,
     recall_score, f1_score, accuracy_score, average_precision_score,
@@ -42,7 +42,6 @@ class FraudDetector:
                  lr_recon=1e-3, lr_disc=3e-4,
                  threshold_percentile=99,
                  n_disc_steps=1,
-                 pretrain_epochs=50,
                  score_weight=0.5,
                  random_state=42):
         self.datasets = datasets
@@ -55,11 +54,10 @@ class FraudDetector:
         self.lr_disc = lr_disc
         self.threshold_percentile = threshold_percentile
         self.n_disc_steps = n_disc_steps
-        self.pretrain_epochs = pretrain_epochs
         self.score_weight = score_weight
         self.random_state = random_state
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.scaler = StandardScaler()
+        self.scaler = RobustScaler()
         self.model = None
         self.threshold = None
         self.score_stats = None
@@ -147,7 +145,7 @@ class FraudDetector:
             X_t   = torch.clamp(X_t, -10.0, 10.0)
             mu, logvar  = self.model.encoder(X_t)
             x_r         = self.model.decode(mu)
-            recon       = torch.mean((X_t - x_r) ** 2, dim=1).cpu().numpy()
+            recon       = torch.mean((X_t - x_r).abs(), dim=1).cpu().numpy()
             uncertainty = torch.exp(logvar.clamp(-7, 7)).mean(dim=1).cpu().numpy()
             disc        = self.model.discriminate(mu).squeeze(1).cpu().numpy()
         return recon + uncertainty, disc
