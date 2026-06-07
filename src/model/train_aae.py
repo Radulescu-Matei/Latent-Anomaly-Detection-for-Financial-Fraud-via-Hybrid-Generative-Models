@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     confusion_matrix, roc_auc_score, precision_score,
     recall_score, f1_score, accuracy_score, average_precision_score,
@@ -57,7 +57,7 @@ class FraudDetector:
         self.score_weight = score_weight
         self.random_state = random_state
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.scaler = RobustScaler()
+        self.scaler = StandardScaler()
         self.model = None
         self.threshold = None
         self.score_stats = None
@@ -146,7 +146,7 @@ class FraudDetector:
             mu, logvar  = self.model.encoder(X_t)
             x_r         = self.model.decode(mu)
             recon       = torch.mean((X_t - x_r).abs(), dim=1).cpu().numpy()
-            uncertainty = torch.exp(logvar.clamp(-7, 7)).mean(dim=1).cpu().numpy()
+            uncertainty = logvar.clamp(-7, 7).mean(dim=1).cpu().numpy()
             disc        = self.model.discriminate(mu).squeeze(1).cpu().numpy()
         return recon + uncertainty, disc
 
@@ -155,7 +155,7 @@ class FraudDetector:
         r_min, r_max, d_min, d_max = self.score_stats
         recon_norm = (recon - r_min) / (r_max - r_min)
         disc_norm  = (disc  - d_min) / (d_max - d_min)
-        return self.score_weight * recon_norm + (1 - self.score_weight) * (disc_norm)
+        return self.score_weight * recon_norm + (1 - self.score_weight) * disc_norm
 
     def load_data(self):
         X_all, y_all = self._load_single(self.datasets[0])
@@ -197,6 +197,7 @@ class FraudDetector:
                 batch_x = batch_x.to(self.device)
                 batch_x = torch.nan_to_num(batch_x, nan=0.0, posinf=0.0, neginf=0.0)
                 batch_x = torch.clamp(batch_x, -10.0, 10.0)
+                batch_x = batch_x + 0.1 * torch.randn_like(batch_x)
                 n = batch_x.size(0)
 
                 # --- Phase 1: reconstruction (stochastic encoder) ---
@@ -228,7 +229,7 @@ class FraudDetector:
                 mu3, logvar3 = self.model.encoder(batch_x)
                 z_gen        = mu3 + torch.randn_like(mu3) * torch.exp(0.5 * logvar3.clamp(-7, 7))
                 d_gen        = self.model.discriminate(z_gen)
-                gen_loss = F.binary_cross_entropy(d_gen, torch.full_like(d_gen, 0.9))
+                gen_loss     = F.binary_cross_entropy(d_gen, torch.full_like(d_gen, 0.9))
                 opt_gen.zero_grad()
                 gen_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.encoder.parameters(), max_norm=1.0)
