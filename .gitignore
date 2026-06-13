@@ -1,3 +1,4 @@
 Datasets/*.csv
-src/model/__pycache__
-src/model/checkpoints
+**/__pycache__/
+**/*.pyc
+src/model/checkpoints/
