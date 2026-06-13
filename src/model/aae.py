@@ -4,17 +4,12 @@ import torch.nn as nn
 class Encoder(nn.Module):
     def __init__(self, input_dim, hidden_dims, latent_dim):
         super().__init__()
-        # Shared layers — same structure as before
         shared = []
         prev_dim = input_dim
         for h_dim in hidden_dims:
-            shared += [
-                nn.Linear(prev_dim, h_dim),
-                nn.LeakyReLU(0.2),
-            ]
+            shared += [nn.Linear(prev_dim, h_dim), nn.LeakyReLU(0.2)]
             prev_dim = h_dim
-        self.shared = nn.Sequential(*shared)
-        # Two output heads: mean and log-variance of the latent Gaussian
+        self.shared    = nn.Sequential(*shared)
         self.fc_mu     = nn.Linear(prev_dim, latent_dim)
         self.fc_logvar = nn.Linear(prev_dim, latent_dim)
 
@@ -29,10 +24,7 @@ class Decoder(nn.Module):
         layers = []
         prev_dim = latent_dim
         for h_dim in reversed(hidden_dims):
-            layers += [
-                nn.Linear(prev_dim, h_dim),
-                nn.LeakyReLU(0.2),
-            ]
+            layers += [nn.Linear(prev_dim, h_dim), nn.LeakyReLU(0.2)]
             prev_dim = h_dim
         layers.append(nn.Linear(prev_dim, output_dim))
         self.net = nn.Sequential(*layers)
@@ -48,11 +40,9 @@ class Discriminator(nn.Module):
         h2 = max(32, latent_dim * 2)
         self.net = nn.Sequential(
             nn.utils.spectral_norm(nn.Linear(latent_dim, h1)),
-            nn.LeakyReLU(0.2),
-            nn.Dropout(0.2),
+            nn.LeakyReLU(0.2), nn.Dropout(0.2),
             nn.utils.spectral_norm(nn.Linear(h1, h2)),
-            nn.LeakyReLU(0.2),
-            nn.Dropout(0.2),
+            nn.LeakyReLU(0.2), nn.Dropout(0.2),
             nn.utils.spectral_norm(nn.Linear(h2, 1)),
             nn.Sigmoid(),
         )
@@ -78,8 +68,6 @@ class AAE(nn.Module):
         mu, _ = self.encoder(x)
         return mu
 
-    def decode(self, z):
-        return self.decoder(z)
+    def decode(self, z): return self.decoder(z)
 
-    def discriminate(self, z):
-        return self.discriminator(z)
+    def discriminate(self, z): return self.discriminator(z)

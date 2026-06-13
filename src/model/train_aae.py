@@ -12,6 +12,7 @@ from sklearn.metrics import (
     confusion_matrix, roc_auc_score, precision_score,
     recall_score, f1_score, accuracy_score, average_precision_score,
 )
+from sklearn.svm import OneClassSVM
 sys.path.insert(0, os.path.dirname(__file__))
 from aae import AAE
 
@@ -43,6 +44,9 @@ class FraudDetector:
                  threshold_percentile=99,
                  n_disc_steps=1,
                  score_weight=0.5,
+                 posthoc_disc_epochs=0,
+                 disc_noise_std=0.0,
+                 adv_ramp_epochs=0,
                  random_state=42):
         self.datasets = datasets
         self.name = name
@@ -55,10 +59,14 @@ class FraudDetector:
         self.threshold_percentile = threshold_percentile
         self.n_disc_steps = n_disc_steps
         self.score_weight = score_weight
+        self.posthoc_disc_epochs = posthoc_disc_epochs
+        self.disc_noise_std = disc_noise_std
+        self.adv_ramp_epochs = adv_ramp_epochs
         self.random_state = random_state
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.scaler = StandardScaler()
         self.model = None
+        self.ocsvm = None
         self.threshold = None
         self.score_stats = None
         self.cols_to_keep = None
@@ -157,6 +165,74 @@ class FraudDetector:
         disc_norm  = (disc  - d_min) / (d_max - d_min)
         return self.score_weight * recon_norm + (1 - self.score_weight) * disc_norm
 
+    def _fit_ocsvm(self, X_train_normal):
+        print("Fitting OC-SVM on latent codes...")
+        self.model.eval()
+        all_mu = []
+        loader = DataLoader(FraudDataset(X_train_normal), batch_size=self.batch_size, shuffle=False)
+        with torch.no_grad():
+            for batch_x in loader:
+                batch_x = batch_x.to(self.device)
+                batch_x = torch.nan_to_num(batch_x, nan=0.0, posinf=0.0, neginf=0.0)
+                batch_x = torch.clamp(batch_x, -10.0, 10.0)
+                mu, _ = self.model.encoder(batch_x)
+                all_mu.append(mu.cpu().numpy())
+        Z_train = np.concatenate(all_mu, axis=0)
+        rng = np.random.RandomState(self.random_state)
+        if len(Z_train) > 10000:
+            idx = rng.choice(len(Z_train), 10000, replace=False)
+            Z_fit = Z_train[idx]
+        else:
+            Z_fit = Z_train
+        self.ocsvm = OneClassSVM(nu=0.1, kernel='rbf', gamma='scale')
+        self.ocsvm.fit(Z_fit)
+        print(f"OC-SVM fitted on {len(Z_fit)} latent codes.")
+
+    def _train_posthoc_discriminator(self, X_train_normal, epochs):
+        """Freeze encoder, reset disc weights, train disc on fixed latent codes."""
+        print(f"\n--- Post-hoc discriminator: {epochs} epochs (encoder frozen) ---")
+
+        for p in self.model.encoder.parameters():
+            p.requires_grad = False
+
+        def reset_weights(m):
+            if hasattr(m, 'reset_parameters'):
+                m.reset_parameters()
+        self.model.discriminator.apply(reset_weights)
+
+        opt_ph = optim.Adam(self.model.discriminator.parameters(),
+                            lr=self.lr_disc, betas=(0.5, 0.999))
+        pin = self.device.type == 'cuda'
+        loader = DataLoader(FraudDataset(X_train_normal), batch_size=self.batch_size,
+                            shuffle=True, pin_memory=pin)
+
+        for epoch in range(epochs):
+            self.model.discriminator.train()
+            total = 0.0
+            for batch_x in loader:
+                batch_x = batch_x.to(self.device)
+                batch_x = torch.nan_to_num(batch_x, nan=0.0, posinf=0.0, neginf=0.0)
+                batch_x = torch.clamp(batch_x, -10.0, 10.0)
+                n = batch_x.size(0)
+                with torch.no_grad():
+                    mu, _ = self.model.encoder(batch_x)
+                z_prior = torch.randn(n, self.latent_dim, device=self.device)
+                d_real = self.model.discriminate(z_prior)
+                d_fake = self.model.discriminate(mu)
+                loss = (F.binary_cross_entropy(d_real, torch.full_like(d_real, 0.9)) +
+                        F.binary_cross_entropy(d_fake, torch.full_like(d_fake, 0.1)))
+                opt_ph.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.discriminator.parameters(), max_norm=1.0)
+                opt_ph.step()
+                total += loss.item()
+            if (epoch + 1) % 10 == 0:
+                print(f"  ph-disc [{epoch+1:3d}/{epochs}]  loss={total/len(loader):.4f}")
+
+        for p in self.model.encoder.parameters():
+            p.requires_grad = True
+        print("--- Post-hoc discriminator done ---\n")
+
     def load_data(self):
         X_all, y_all = self._load_single(self.datasets[0])
         return self._preprocess(X_all, y_all, fit=True)
@@ -197,8 +273,8 @@ class FraudDetector:
                 batch_x = batch_x.to(self.device)
                 batch_x = torch.nan_to_num(batch_x, nan=0.0, posinf=0.0, neginf=0.0)
                 batch_x = torch.clamp(batch_x, -10.0, 10.0)
-                batch_x = batch_x + 0.1 * torch.randn_like(batch_x)
-                n = batch_x.size(0)
+                n       = batch_x.size(0)
+                batch_x = batch_x + 0.05 * torch.randn_like(batch_x)
 
                 # --- Phase 1: reconstruction (stochastic encoder) ---
                 opt_recon.zero_grad()
@@ -215,9 +291,14 @@ class FraudDetector:
                     mu2, logvar2 = self.model.encoder(batch_x)
                     z_enc        = mu2 + torch.randn_like(mu2) * torch.exp(0.5 * logvar2.clamp(-7, 7))
                 for _ in range(self.n_disc_steps):
-                    z_prior   = torch.randn(n, self.latent_dim, device=self.device)
-                    d_real    = self.model.discriminate(z_prior)
-                    d_fake    = self.model.discriminate(z_enc)
+                    z_prior = torch.randn(n, self.latent_dim, device=self.device)
+                    if self.disc_noise_std > 0:
+                        z_prior_in = z_prior + self.disc_noise_std * torch.randn_like(z_prior)
+                        z_enc_in   = z_enc   + self.disc_noise_std * torch.randn_like(z_enc)
+                    else:
+                        z_prior_in, z_enc_in = z_prior, z_enc
+                    d_real    = self.model.discriminate(z_prior_in)
+                    d_fake    = self.model.discriminate(z_enc_in)
                     disc_loss = (F.binary_cross_entropy(d_real, torch.full_like(d_real, 0.9)) +
                                  F.binary_cross_entropy(d_fake, torch.full_like(d_fake, 0.1)))
                     opt_disc.zero_grad()
@@ -228,8 +309,12 @@ class FraudDetector:
                 # --- Phase 3: encoder adversarial update — fools discriminator into seeing encoder output as prior ---
                 mu3, logvar3 = self.model.encoder(batch_x)
                 z_gen        = mu3 + torch.randn_like(mu3) * torch.exp(0.5 * logvar3.clamp(-7, 7))
-                d_gen        = self.model.discriminate(z_gen)
+                z_gen_in     = (z_gen + self.disc_noise_std * torch.randn_like(z_gen)
+                                if self.disc_noise_std > 0 else z_gen)
+                d_gen        = self.model.discriminate(z_gen_in)
                 gen_loss     = F.binary_cross_entropy(d_gen, torch.full_like(d_gen, 0.9))
+                if self.adv_ramp_epochs > 0:
+                    gen_loss = gen_loss * min(1.0, epoch / self.adv_ramp_epochs)
                 opt_gen.zero_grad()
                 gen_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.encoder.parameters(), max_norm=1.0)
@@ -247,6 +332,9 @@ class FraudDetector:
                       f"recon={total_recon/n_batches:.4f}  "
                       f"disc={total_disc/n_batches:.4f}  "
                       f"lr={lr_now:.6f}")
+
+        if self.posthoc_disc_epochs > 0:
+            self._train_posthoc_discriminator(X_train_normal, self.posthoc_disc_epochs)
 
         recon_tr, disc_tr = self._raw_scores(X_train_normal)
         self.score_stats = (recon_tr.min(), recon_tr.max(), disc_tr.min(), disc_tr.max())
@@ -300,35 +388,60 @@ class FraudDetector:
         print(f"ROC-AUC: {roc_auc:.4f} | PR-AUC: {pr_auc:.4f} | "
               f"Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}")
 
+    def save(self, path, X_test, y_test):
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        torch.save({
+            'model_state':    self.model.state_dict(),
+            'scaler':         self.scaler,
+            'ocsvm':          self.ocsvm,
+            'score_stats':    self.score_stats,
+            'threshold':      self.threshold,
+            'cols_to_keep':   self.cols_to_keep,
+            'medians':        self.medians,
+            'indicator_cols': self.indicator_cols,
+            'input_dim':      self.model.encoder.shared[0].in_features,
+            'latent_dim':     self.latent_dim,
+            'X_test':         X_test,
+            'y_test':         y_test,
+        }, path)
+        print(f"Checkpoint saved -> {path}")
+
+    def load(self, path):
+        ckpt = torch.load(path, map_location=self.device)
+        self.scaler         = ckpt['scaler']
+        self.ocsvm          = ckpt.get('ocsvm', None)
+        self.score_stats    = ckpt['score_stats']
+        self.threshold      = ckpt['threshold']
+        self.cols_to_keep   = ckpt['cols_to_keep']
+        self.medians        = ckpt['medians']
+        self.indicator_cols = ckpt['indicator_cols']
+        self.model = AAE(ckpt['input_dim'], ckpt['latent_dim']).to(self.device)
+        self.model.load_state_dict(ckpt['model_state'])
+        print(f"Checkpoint loaded <- {path}")
+        return ckpt['X_test'], ckpt['y_test']
+
 
 if __name__ == "__main__":
-    detector_cc = FraudDetector(
-        datasets=[DatasetConfig(
-            data_path='Datasets/creditcard.csv',
-            target_column='Class',
-        )],
-        name='creditcard',
-        latent_dim=32,
-        batch_size=128,
-        epochs=150,
-        threshold_percentile=99,
-        score_weight=0.5,
-    )
-    X_test_cc, y_test_cc = detector_cc.train()
-    detector_cc.evaluate(X_test_cc, y_test_cc)
+    _CC_DATA = [DatasetConfig(data_path='Datasets/creditcard.csv', target_column='Class')]
+    _BASE = dict(latent_dim=32, batch_size=128, epochs=150,
+                 threshold_percentile=99, score_weight=0.5)
 
-    detector_ieee = FraudDetector(
-        datasets=[DatasetConfig(
-            data_path='Datasets/train_transaction.csv',
-            target_column='isFraud',
-            id_columns=['TransactionID'],
-            merge_files=[{'path': 'Datasets/train_identity.csv', 'on': 'TransactionID'}],
-        )],
-        name='ieee',
-        latent_dim=64,
-        batch_size=128,
-        epochs=200,
-        threshold_percentile=99,
-    )
-    X_test_ieee, y_test_ieee = detector_ieee.train()
-    detector_ieee.evaluate(X_test_ieee, y_test_ieee)
+    # ── Experiment 1: noise on discriminator inputs ──────────────────────────
+    print("\n" + "="*60)
+    print("EXPERIMENT 1: Noise on discriminator inputs (disc_noise_std=0.05)")
+    print("="*60 + "\n")
+    exp1 = FraudDetector(datasets=_CC_DATA, name='creditcard_disc_noise',
+                         disc_noise_std=0.05, **_BASE)
+    X1, y1 = exp1.train()
+    exp1.save('src/model/checkpoints/creditcard_disc_noise.pt', X1, y1)
+    exp1.evaluate(X1, y1)
+
+    # ── Experiment 2: gradual adversarial weight ramp ────────────────────────
+    print("\n" + "="*60)
+    print("EXPERIMENT 2: Gradual adversarial weight ramp (adv_ramp_epochs=50)")
+    print("="*60 + "\n")
+    exp2 = FraudDetector(datasets=_CC_DATA, name='creditcard_adv_ramp',
+                         adv_ramp_epochs=50, **_BASE)
+    X2, y2 = exp2.train()
+    exp2.save('src/model/checkpoints/creditcard_adv_ramp.pt', X2, y2)
+    exp2.evaluate(X2, y2)
