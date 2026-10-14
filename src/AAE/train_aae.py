@@ -282,8 +282,8 @@ class FraudDetector:
         cm = confusion_matrix(y_test, y_pred)
         tn, fp, fn, tp = cm.ravel()
 
-        os.makedirs('src/model/results', exist_ok=True)
-        out_path = f'src/model/results/aae_results_{self.name}.txt'
+        os.makedirs('src/AAE/results', exist_ok=True)
+        out_path = f'src/AAE/results/aae_results_{self.name}.txt'
         with open(out_path, 'w') as f:
             f.write(f"AAE Results — {self.name}\n\n")
             f.write(f"Accuracy:  {accuracy:.4f}\n")
@@ -339,7 +339,7 @@ if __name__ == "__main__":
         threshold_percentile=99, score_weight=0.5,
     )
     Xc, yc = cc.train()
-    cc.save('src/model/checkpoints/creditcard.pt', Xc, yc)
+    cc.save('src/AAE/checkpoints/creditcard.pt', Xc, yc)
     cc.evaluate(Xc, yc)
 
     ieee = FraudDetector(
@@ -356,5 +356,5 @@ if __name__ == "__main__":
         max_train_samples=200_000,
     )
     Xi, yi = ieee.train()
-    ieee.save('src/model/checkpoints/ieee.pt', Xi, yi)
+    ieee.save('src/AAE/checkpoints/ieee.pt', Xi, yi)
     ieee.evaluate(Xi, yi)
